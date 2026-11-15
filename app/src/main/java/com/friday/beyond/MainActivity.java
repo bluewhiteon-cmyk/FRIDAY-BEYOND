@@ -3,14 +3,21 @@ package com.friday.beyond;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.graphics.Color;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.*;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.Manifest;
 import android.net.Uri;
+import android.speech.SpeechRecognizer;
 import android.speech.RecognizerIntent;
+import android.speech.RecognitionListener;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 import com.chaquo.python.PyObject;
@@ -23,18 +30,30 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Locale;
 import org.json.JSONObject;
 
 public class MainActivity extends Activity {
 
     private static final int PICK_ENV_FILE = 701;
     private static final int PICK_MEMORY_FILE = 702;
-    private static final int PICK_SPEECH = 703;
     private static final int REQUEST_MICROPHONE = 704;
 
     LinearLayout messages;
     EditText input;
+    TextView status;
+    Button wakeButton;
+
     PyObject friday;
+    SpeechRecognizer recognizer;
+    TextToSpeech tts;
+
+    Handler handler = new Handler(Looper.getMainLooper());
+
+    boolean wakeMode = false;
+    boolean commandMode = false;
+    boolean activityResumed = false;
+    boolean ttsReady = false;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -45,11 +64,43 @@ public class MainActivity extends Activity {
         }
 
         friday = Python.getInstance().getModule("friday_engine");
-        friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
+        friday.callAttr("configure_android",
+                getFilesDir().getAbsolutePath());
 
+        tts = new TextToSpeech(this, result -> {
+            if (result == TextToSpeech.SUCCESS) {
+                int language = tts.setLanguage(
+                        Locale.forLanguageTag("en-IN"));
+
+                ttsReady = language != TextToSpeech.LANG_MISSING_DATA
+                        && language != TextToSpeech.LANG_NOT_SUPPORTED;
+            }
+        });
+
+        tts.setOnUtteranceProgressListener(
+            new UtteranceProgressListener() {
+                @Override
+                public void onStart(String id) {}
+
+                @Override
+                public void onDone(String id) {
+                    runOnUiThread(() -> afterSpeech());
+                }
+
+                @Override
+                public void onError(String id) {
+                    runOnUiThread(() -> afterSpeech());
+                }
+            }
+        );
+
+        buildInterface();
+    }
+
+    private void buildInterface() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(20, 20, 20, 20);
+        root.setPadding(16, 16, 16, 16);
         root.setBackgroundColor(Color.rgb(15, 12, 25));
 
         TextView title = new TextView(this);
@@ -59,21 +110,32 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER);
         root.addView(title);
 
+        status = new TextView(this);
+        status.setText("SYSTEM READY");
+        status.setTextColor(Color.WHITE);
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(8, 14, 8, 14);
+        root.addView(status);
+
         Button importConfig = new Button(this);
         importConfig.setText("IMPORT API CONFIG");
         root.addView(importConfig);
-        importConfig.setOnClickListener(v -> openPicker(PICK_ENV_FILE));
+        importConfig.setOnClickListener(v ->
+                openPicker(PICK_ENV_FILE));
 
         Button importMemory = new Button(this);
         importMemory.setText("IMPORT FRIDAY MEMORY");
         root.addView(importMemory);
-        importMemory.setOnClickListener(v -> openPicker(PICK_MEMORY_FILE));
+        importMemory.setOnClickListener(v ->
+                openPicker(PICK_MEMORY_FILE));
 
         ScrollView scroll = new ScrollView(this);
         messages = new LinearLayout(this);
         messages.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(messages);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        root.addView(scroll,
+                new LinearLayout.LayoutParams(-1, 0, 1));
 
         input = new EditText(this);
         input.setHint("Message FRIDAY...");
@@ -83,69 +145,306 @@ public class MainActivity extends Activity {
         input.setInputType(InputType.TYPE_CLASS_TEXT);
 
         Button voice = new Button(this);
-        voice.setText("VOICE");
-        voice.setOnClickListener(v -> startVoiceInput());
+        voice.setText("WAKE WORD ON");
+        wakeButton = voice;
+
+        voice.setOnClickListener(v -> toggleWakeMode());
 
         Button send = new Button(this);
         send.setText("SEND");
+        send.setOnClickListener(v ->
+                sendMessage(false, input.getText().toString()));
 
         LinearLayout bottom = new LinearLayout(this);
-        bottom.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
+        bottom.addView(input,
+                new LinearLayout.LayoutParams(0, -2, 1));
         bottom.addView(voice);
         bottom.addView(send);
         root.addView(bottom);
 
-        send.setOnClickListener(v -> sendMessage());
-
         input.setOnEditorActionListener((v, actionId, event) -> {
-            sendMessage();
+            sendMessage(false, input.getText().toString());
             return true;
         });
 
         setContentView(root);
 
-        addMessage("FRIDAY", "Welcome back, Jack. Systems online.");
-        addMessage("FRIDAY", "Import your API config and existing FRIDAY memory using the buttons above.");
-        addMessage("FRIDAY", "Tap VOICE to speak to me.");
+        addMessage("FRIDAY",
+                "Welcome back, Jack. Systems online.");
+        addMessage("FRIDAY",
+                "Import your API config and existing FRIDAY memory.");
+        addMessage("FRIDAY",
+                "Tap WAKE WORD ON and say FRIDAY to activate me.");
     }
 
-    private void startVoiceInput() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
-
-            requestPermissions(
-                new String[]{Manifest.permission.RECORD_AUDIO},
-                REQUEST_MICROPHONE
-            );
+    private void toggleWakeMode() {
+        if (wakeMode) {
+            wakeMode = false;
+            commandMode = false;
+            stopRecognizer();
+            wakeButton.setText("WAKE WORD ON");
+            status.setText("MICROPHONE OFF");
+            addMessage("FRIDAY", "Wake-word listening disabled.");
             return;
         }
 
-        launchSpeechRecognition();
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.RECORD_AUDIO},
+                    REQUEST_MICROPHONE);
+            return;
+        }
+
+        startWakeMode();
     }
 
-    private void launchSpeechRecognition() {
+    private void startWakeMode() {
+        wakeMode = true;
+        commandMode = false;
+        wakeButton.setText("WAKE WORD OFF");
+        status.setText("STANDBY — SAY FRIDAY");
+        addMessage("FRIDAY",
+                "I'm standing by. Say FRIDAY to wake me.");
+        startWakeListening();
+    }
+
+    private void startWakeListening() {
+        if (!wakeMode || commandMode || !activityResumed) {
+            return;
+        }
+
+        startRecognition(true);
+    }
+
+    private void startCommandListening() {
+        if (!wakeMode || !activityResumed) return;
+
+        commandMode = true;
+        status.setText("LISTENING — SPEAK COMMAND");
+        startRecognition(false);
+    }
+
+    private void startRecognition(boolean lookingForWakeWord) {
+        if (!activityResumed || !wakeMode) return;
+
+        stopRecognizer();
+
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            status.setText("SPEECH RECOGNITION UNAVAILABLE");
+            addMessage("FRIDAY",
+                    "Speech recognition is unavailable on this device.");
+            wakeMode = false;
+            wakeButton.setText("WAKE WORD ON");
+            return;
+        }
+
         try {
-            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+
+            recognizer.setRecognitionListener(new RecognitionListener() {
+                @Override
+                public void onReadyForSpeech(Bundle params) {}
+
+                @Override
+                public void onBeginningOfSpeech() {}
+
+                @Override
+                public void onRmsChanged(float rmsdB) {}
+
+                @Override
+                public void onBufferReceived(byte[] buffer) {}
+
+                @Override
+                public void onEndOfSpeech() {}
+
+                @Override
+                public void onPartialResults(Bundle partialResults) {}
+
+                @Override
+                public void onEvent(int eventType, Bundle params) {}
+
+                @Override
+                public void onResults(Bundle results) {
+                    ArrayList<String> matches =
+                            results.getStringArrayList(
+                                    SpeechRecognizer.RESULTS_RECOGNITION);
+
+                    stopRecognizer();
+
+                    if (matches == null || matches.isEmpty()) {
+                        returnToStandby();
+                        return;
+                    }
+
+                    String spoken = matches.get(0).trim();
+
+                    if (lookingForWakeWord) {
+                        if (spoken.toLowerCase(Locale.ROOT)
+                                .contains("friday")) {
+                            commandMode = true;
+                            addMessage("YOU", spoken);
+                            addMessage("FRIDAY",
+                                    "I'm listening, Jack. Speak now.");
+                            startCommandListening();
+                        } else {
+                            handler.postDelayed(
+                                    () -> startWakeListening(), 400);
+                        }
+                    } else {
+                        handleVoiceCommand(spoken);
+                    }
+                }
+
+                @Override
+                public void onError(int error) {
+                    stopRecognizer();
+
+                    if (!wakeMode || !activityResumed) return;
+
+                    if (lookingForWakeWord) {
+                        handler.postDelayed(
+                                () -> startWakeListening(), 700);
+                    } else {
+                        returnToStandby();
+                    }
+                }
+            });
+
+            Intent intent = new Intent(
+                    RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
 
             intent.putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            );
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
 
             intent.putExtra(
-                RecognizerIntent.EXTRA_PROMPT,
-                "Speak to FRIDAY"
-            );
+                    RecognizerIntent.EXTRA_LANGUAGE,
+                    "en-IN");
 
             intent.putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE,
-                "en-IN"
-            );
+                    RecognizerIntent.EXTRA_MAX_RESULTS, 1);
 
-            startActivityForResult(intent, PICK_SPEECH);
+            intent.putExtra(
+                    RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
+
+            recognizer.startListening(intent);
 
         } catch (Exception e) {
-            addMessage("FRIDAY", "Voice recognition is unavailable on this device.");
+            stopRecognizer();
+            status.setText("VOICE ERROR");
+            handler.postDelayed(
+                    () -> startWakeListening(), 1000);
+        }
+    }
+
+    private void handleVoiceCommand(String spoken) {
+        String lower = spoken.toLowerCase(Locale.ROOT).trim();
+
+        if (lower.equals("stop listening")
+                || lower.equals("stop")
+                || lower.equals("cancel listening")
+                || lower.equals("go to standby")) {
+
+            addMessage("YOU", spoken);
+            addMessage("FRIDAY", "Returning to standby, Jack.");
+            returnToStandby();
+            return;
+        }
+
+        sendMessage(true, spoken);
+    }
+
+    private void returnToStandby() {
+        commandMode = false;
+
+        if (wakeMode && activityResumed) {
+            status.setText("STANDBY — SAY FRIDAY");
+            handler.postDelayed(
+                    () -> startWakeListening(), 500);
+        } else {
+            status.setText("MICROPHONE OFF");
+        }
+    }
+
+    private void sendMessage(boolean fromVoice, String rawMessage) {
+        String message = rawMessage.trim();
+
+        if (message.isEmpty()) return;
+
+        if (!fromVoice) {
+            input.setText("");
+        }
+
+        addMessage("YOU", message);
+        status.setText("FRIDAY IS THINKING...");
+
+        new Thread(() -> {
+            String answer;
+
+            try {
+                answer = friday.callAttr(
+                        "android_chat", message).toString();
+            } catch (Exception e) {
+                answer = "Connection error: " + e.getMessage();
+            }
+
+            final String reply = answer;
+
+            runOnUiThread(() -> {
+                addMessage("FRIDAY", reply);
+
+                if (fromVoice) {
+                    speakReply(reply);
+                } else {
+                    status.setText(
+                            wakeMode
+                            ? "STANDBY — SAY FRIDAY"
+                            : "SYSTEM READY");
+                }
+            });
+        }).start();
+    }
+
+    private void speakReply(String reply) {
+        if (ttsReady) {
+            String utteranceId = "FRIDAY_REPLY";
+
+            int result = tts.speak(
+                    reply,
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    utteranceId);
+
+            if (result == TextToSpeech.ERROR) {
+                afterSpeech();
+            }
+        } else {
+            addMessage("FRIDAY",
+                    "Speech output is not ready on this device.");
+            afterSpeech();
+        }
+    }
+
+    private void afterSpeech() {
+        if (wakeMode && activityResumed) {
+            commandMode = false;
+            status.setText("STANDBY — SAY FRIDAY");
+            handler.postDelayed(
+                    () -> startWakeListening(), 500);
+        } else {
+            status.setText("SYSTEM READY");
+        }
+    }
+
+    private void stopRecognizer() {
+        if (recognizer != null) {
+            try {
+                recognizer.cancel();
+                recognizer.destroy();
+            } catch (Exception ignored) {}
+
+            recognizer = null;
         }
     }
 
@@ -155,14 +454,17 @@ public class MainActivity extends Activity {
             String[] permissions,
             int[] grantResults) {
 
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        super.onRequestPermissionsResult(
+                requestCode, permissions, grantResults);
 
         if (requestCode == REQUEST_MICROPHONE) {
             if (grantResults.length > 0
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                launchSpeechRecognition();
+                    && grantResults[0]
+                    == PackageManager.PERMISSION_GRANTED) {
+                startWakeMode();
             } else {
-                addMessage("FRIDAY", "Microphone permission was denied.");
+                addMessage("FRIDAY",
+                        "Microphone permission was denied.");
             }
         }
     }
@@ -178,11 +480,14 @@ public class MainActivity extends Activity {
     private String readSelectedFile(Uri uri) throws Exception {
         StringBuilder contents = new StringBuilder();
 
-        try (InputStream in = getContentResolver().openInputStream(uri);
+        try (InputStream in =
+                     getContentResolver().openInputStream(uri);
              BufferedReader reader = new BufferedReader(
-                 new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                     new InputStreamReader(
+                             in, StandardCharsets.UTF_8))) {
 
             String line;
+
             while ((line = reader.readLine()) != null) {
                 contents.append(line).append('\n');
             }
@@ -191,10 +496,13 @@ public class MainActivity extends Activity {
         return contents.toString();
     }
 
-    private void writePrivateFile(String filename, String contents) throws Exception {
+    private void writePrivateFile(
+            String filename, String contents) throws Exception {
+
         File target = new File(getFilesDir(), filename);
 
-        try (OutputStream out = new FileOutputStream(target, false)) {
+        try (OutputStream out =
+                     new FileOutputStream(target, false)) {
             out.write(contents.getBytes(StandardCharsets.UTF_8));
             out.flush();
         }
@@ -206,25 +514,15 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    protected void onActivityResult(
+            int requestCode, int resultCode, Intent data) {
+
         super.onActivityResult(requestCode, resultCode, data);
 
-        if (requestCode == PICK_SPEECH) {
-            if (resultCode == RESULT_OK && data != null) {
-                ArrayList<String> results = data.getStringArrayListExtra(
-                    RecognizerIntent.EXTRA_RESULTS
-                );
-
-                if (results != null && !results.isEmpty()) {
-                    input.setText(results.get(0));
-                    sendMessage();
-                }
-            }
-            return;
-        }
-
-        if ((requestCode != PICK_ENV_FILE && requestCode != PICK_MEMORY_FILE)
-                || resultCode != RESULT_OK || data == null) {
+        if ((requestCode != PICK_ENV_FILE
+                && requestCode != PICK_MEMORY_FILE)
+                || resultCode != RESULT_OK
+                || data == null) {
             return;
         }
 
@@ -263,14 +561,17 @@ public class MainActivity extends Activity {
                 }
 
                 if (!hasGemini && !(hasAccount && hasToken)) {
-                    addMessage("FRIDAY", "Missing usable API credentials.");
+                    addMessage("FRIDAY",
+                            "Missing usable API credentials.");
                     return;
                 }
 
                 writePrivateFile(".env", contents);
-                friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
+                friday.callAttr("configure_android",
+                        getFilesDir().getAbsolutePath());
 
-                addMessage("FRIDAY", "API configuration imported successfully.");
+                addMessage("FRIDAY",
+                        "API configuration imported successfully.");
 
             } else {
                 JSONObject memory = new JSONObject(contents);
@@ -278,41 +579,23 @@ public class MainActivity extends Activity {
                 if (!memory.has("owner_name")
                         && !memory.has("saved_facts")
                         && !memory.has("preferences")) {
-                    addMessage("FRIDAY", "This does not look like FRIDAY memory.json.");
+                    addMessage("FRIDAY",
+                            "This does not look like FRIDAY memory.json.");
                     return;
                 }
 
                 writePrivateFile("memory.json", contents);
-                friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
+                friday.callAttr("configure_android",
+                        getFilesDir().getAbsolutePath());
 
-                addMessage("FRIDAY", "FRIDAY memory imported. Ask about your favourite anime.");
+                addMessage("FRIDAY",
+                        "FRIDAY memory imported successfully.");
             }
 
         } catch (Exception e) {
-            addMessage("FRIDAY", "Import failed: " + e.getMessage());
+            addMessage("FRIDAY",
+                    "Import failed: " + e.getMessage());
         }
-    }
-
-    void sendMessage() {
-        String message = input.getText().toString().trim();
-
-        if (message.isEmpty()) return;
-
-        input.setText("");
-        addMessage("YOU", message);
-
-        new Thread(() -> {
-            String answer;
-
-            try {
-                answer = friday.callAttr("android_chat", message).toString();
-            } catch (Exception e) {
-                answer = "Connection error: " + e.getMessage();
-            }
-
-            final String reply = answer;
-            runOnUiThread(() -> addMessage("FRIDAY", reply));
-        }).start();
     }
 
     void addMessage(String sender, String message) {
@@ -328,5 +611,36 @@ public class MainActivity extends Activity {
 
         params.setMargins(0, 10, 0, 10);
         messages.addView(bubble, params);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        activityResumed = true;
+
+        if (wakeMode && !commandMode) {
+            handler.postDelayed(
+                    () -> startWakeListening(), 500);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        activityResumed = false;
+        stopRecognizer();
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        wakeMode = false;
+        stopRecognizer();
+
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+        }
+
+        super.onDestroy();
     }
 }
