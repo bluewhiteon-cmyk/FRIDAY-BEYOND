@@ -1,0 +1,12 @@
+.env
+*.env
+memory.json
+conversation_history.json
+__pycache__/
+*.pyc
+.gradle/
+build/
+app/build/
+local.properties
+*.jks
+*.keystore
