@@ -1,3 +1,4 @@
+
 package com.friday.beyond;
 
 import android.app.Activity;
@@ -18,9 +19,12 @@ import java.io.FileOutputStream;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final int PICK_ENV_FILE = 701;
+    private static final int PICK_MEMORY_FILE = 702;
+
     LinearLayout messages;
     EditText input;
     PyObject friday;
@@ -51,7 +55,12 @@ public class MainActivity extends Activity {
         Button importConfig = new Button(this);
         importConfig.setText("IMPORT API CONFIG");
         root.addView(importConfig);
-        importConfig.setOnClickListener(v -> openConfigPicker());
+        importConfig.setOnClickListener(v -> openPicker(PICK_ENV_FILE));
+
+        Button importMemory = new Button(this);
+        importMemory.setText("IMPORT FRIDAY MEMORY");
+        root.addView(importMemory);
+        importMemory.setOnClickListener(v -> openPicker(PICK_MEMORY_FILE));
 
         ScrollView scroll = new ScrollView(this);
         messages = new LinearLayout(this);
@@ -81,83 +90,126 @@ public class MainActivity extends Activity {
         });
 
         setContentView(root);
+
         addMessage("FRIDAY", "Welcome back, Jack. Systems online.");
-        addMessage("FRIDAY", "Tap IMPORT API CONFIG to select your existing .env file.");
+        addMessage("FRIDAY", "Import your API config and existing FRIDAY memory using the buttons above.");
     }
 
-    private void openConfigPicker() {
+    private void openPicker(int requestCode) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_TITLE, ".env");
-        startActivityForResult(intent, PICK_ENV_FILE);
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
+        startActivityForResult(intent, requestCode);
+    }
+
+    private String readSelectedFile(Uri uri) throws Exception {
+        StringBuilder contents = new StringBuilder();
+
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             BufferedReader reader = new BufferedReader(
+                 new InputStreamReader(in, StandardCharsets.UTF_8))) {
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                contents.append(line).append('\n');
+            }
+        }
+
+        return contents.toString();
+    }
+
+    private void writePrivateFile(String filename, String contents) throws Exception {
+        File target = new File(getFilesDir(), filename);
+
+        try (OutputStream out = new FileOutputStream(target, false)) {
+            out.write(contents.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+
+        target.setReadable(false, false);
+        target.setWritable(false, false);
+        target.setReadable(true, true);
+        target.setWritable(true, true);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_ENV_FILE || resultCode != RESULT_OK || data == null) {
+
+        if ((requestCode != PICK_ENV_FILE && requestCode != PICK_MEMORY_FILE)
+                || resultCode != RESULT_OK || data == null) {
             return;
         }
 
         Uri uri = data.getData();
+
         if (uri == null) {
             addMessage("FRIDAY", "No file was selected.");
             return;
         }
 
         try {
-            StringBuilder contents = new StringBuilder();
-            boolean hasGemini = false;
-            boolean hasAccount = false;
-            boolean hasToken = false;
+            String contents = readSelectedFile(uri);
 
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 BufferedReader reader = new BufferedReader(
-                     new InputStreamReader(in, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    contents.append(line).append('\n');
+            if (requestCode == PICK_ENV_FILE) {
+                boolean hasGemini = false;
+                boolean hasAccount = false;
+                boolean hasToken = false;
+
+                for (String line : contents.split("\\r?\\n")) {
                     String trimmed = line.trim();
-                    if (trimmed.startsWith("GEMINI_API_KEY=") &&
-                        !trimmed.substring("GEMINI_API_KEY=".length()).trim().isEmpty()) {
+
+                    if (trimmed.startsWith("GEMINI_API_KEY=")
+                            && !trimmed.substring(15).trim().isEmpty()) {
                         hasGemini = true;
                     }
-                    if (trimmed.startsWith("CLOUDFLARE_ACCOUNT_ID=") &&
-                        !trimmed.substring("CLOUDFLARE_ACCOUNT_ID=".length()).trim().isEmpty()) {
+
+                    if (trimmed.startsWith("CLOUDFLARE_ACCOUNT_ID=")
+                            && !trimmed.substring(22).trim().isEmpty()) {
                         hasAccount = true;
                     }
-                    if (trimmed.startsWith("CLOUDFLARE_API_TOKEN=") &&
-                        !trimmed.substring("CLOUDFLARE_API_TOKEN=".length()).trim().isEmpty()) {
+
+                    if (trimmed.startsWith("CLOUDFLARE_API_TOKEN=")
+                            && !trimmed.substring(21).trim().isEmpty()) {
                         hasToken = true;
                     }
                 }
+
+                if (!hasGemini && !(hasAccount && hasToken)) {
+                    addMessage("FRIDAY", "Missing usable API credentials.");
+                    return;
+                }
+
+                writePrivateFile(".env", contents);
+                friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
+
+                addMessage("FRIDAY", "API configuration imported successfully.");
+
+            } else {
+                JSONObject memory = new JSONObject(contents);
+
+                if (!memory.has("owner_name")
+                        && !memory.has("saved_facts")
+                        && !memory.has("preferences")) {
+                    addMessage("FRIDAY", "This does not look like FRIDAY memory.json.");
+                    return;
+                }
+
+                writePrivateFile("memory.json", contents);
+                friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
+
+                addMessage("FRIDAY", "FRIDAY memory imported. Ask about your favourite anime.");
             }
 
-            if (!hasGemini && !(hasAccount && hasToken)) {
-                addMessage("FRIDAY", "The selected file is missing usable AI credentials. Nothing was imported.");
-                return;
-            }
-
-            File target = new File(getFilesDir(), ".env");
-            try (OutputStream out = new FileOutputStream(target, false)) {
-                out.write(contents.toString().getBytes(StandardCharsets.UTF_8));
-                out.flush();
-            }
-            target.setReadable(false, false);
-            target.setWritable(false, false);
-            target.setReadable(true, true);
-            target.setWritable(true, true);
-
-            friday.callAttr("configure_android", getFilesDir().getAbsolutePath());
-            addMessage("FRIDAY", "API configuration imported into private app storage. Please send: Hello FRIDAY");
         } catch (Exception e) {
-            addMessage("FRIDAY", "Could not import the configuration: " + e.getMessage());
+            addMessage("FRIDAY", "Import failed: " + e.getMessage());
         }
     }
 
     void sendMessage() {
         String message = input.getText().toString().trim();
+
         if (message.isEmpty()) return;
 
         input.setText("");
@@ -165,6 +217,7 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             String answer;
+
             try {
                 answer = friday.callAttr("android_chat", message).toString();
             } catch (Exception e) {
@@ -185,7 +238,8 @@ public class MainActivity extends Activity {
         bubble.setBackgroundColor(Color.rgb(43, 32, 62));
 
         LinearLayout.LayoutParams params =
-            new LinearLayout.LayoutParams(-1, -2);
+                new LinearLayout.LayoutParams(-1, -2);
+
         params.setMargins(0, 10, 0, 10);
         messages.addView(bubble, params);
     }
