@@ -7,7 +7,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.graphics.Color;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.*;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -55,6 +54,8 @@ public class MainActivity extends Activity {
     boolean activityResumed = false;
     boolean ttsReady = false;
 
+    private int recognitionGeneration = 0;
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -71,28 +72,26 @@ public class MainActivity extends Activity {
             if (result == TextToSpeech.SUCCESS) {
                 int language = tts.setLanguage(
                         Locale.forLanguageTag("en-IN"));
-
                 ttsReady = language != TextToSpeech.LANG_MISSING_DATA
                         && language != TextToSpeech.LANG_NOT_SUPPORTED;
             }
         });
 
         tts.setOnUtteranceProgressListener(
-            new UtteranceProgressListener() {
-                @Override
-                public void onStart(String id) {}
+                new UtteranceProgressListener() {
+                    @Override
+                    public void onStart(String id) {}
 
-                @Override
-                public void onDone(String id) {
-                    runOnUiThread(() -> afterSpeech());
-                }
+                    @Override
+                    public void onDone(String id) {
+                        runOnUiThread(() -> afterSpeech());
+                    }
 
-                @Override
-                public void onError(String id) {
-                    runOnUiThread(() -> afterSpeech());
-                }
-            }
-        );
+                    @Override
+                    public void onError(String id) {
+                        runOnUiThread(() -> afterSpeech());
+                    }
+                });
 
         buildInterface();
     }
@@ -120,20 +119,19 @@ public class MainActivity extends Activity {
         Button importConfig = new Button(this);
         importConfig.setText("IMPORT API CONFIG");
         root.addView(importConfig);
-        importConfig.setOnClickListener(v ->
-                openPicker(PICK_ENV_FILE));
+        importConfig.setOnClickListener(
+                v -> openPicker(PICK_ENV_FILE));
 
         Button importMemory = new Button(this);
         importMemory.setText("IMPORT FRIDAY MEMORY");
         root.addView(importMemory);
-        importMemory.setOnClickListener(v ->
-                openPicker(PICK_MEMORY_FILE));
+        importMemory.setOnClickListener(
+                v -> openPicker(PICK_MEMORY_FILE));
 
         ScrollView scroll = new ScrollView(this);
         messages = new LinearLayout(this);
         messages.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(messages);
-
         root.addView(scroll,
                 new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -144,11 +142,9 @@ public class MainActivity extends Activity {
         input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
 
-        Button voice = new Button(this);
-        voice.setText("WAKE WORD ON");
-        wakeButton = voice;
-
-        voice.setOnClickListener(v -> toggleWakeMode());
+        wakeButton = new Button(this);
+        wakeButton.setText("WAKE WORD ON");
+        wakeButton.setOnClickListener(v -> toggleWakeMode());
 
         Button send = new Button(this);
         send.setText("SEND");
@@ -158,7 +154,7 @@ public class MainActivity extends Activity {
         LinearLayout bottom = new LinearLayout(this);
         bottom.addView(input,
                 new LinearLayout.LayoutParams(0, -2, 1));
-        bottom.addView(voice);
+        bottom.addView(wakeButton);
         bottom.addView(send);
         root.addView(bottom);
 
@@ -210,16 +206,12 @@ public class MainActivity extends Activity {
     }
 
     private void startWakeListening() {
-        if (!wakeMode || commandMode || !activityResumed) {
-            return;
-        }
-
+        if (!wakeMode || commandMode || !activityResumed) return;
         startRecognition(true);
     }
 
     private void startCommandListening() {
         if (!wakeMode || !activityResumed) return;
-
         commandMode = true;
         status.setText("LISTENING — SPEAK COMMAND");
         startRecognition(false);
@@ -229,20 +221,27 @@ public class MainActivity extends Activity {
         if (!activityResumed || !wakeMode) return;
 
         stopRecognizer();
+        final int session = ++recognitionGeneration;
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             status.setText("SPEECH RECOGNITION UNAVAILABLE");
-            addMessage("FRIDAY",
-                    "Speech recognition is unavailable on this device.");
             wakeMode = false;
+            commandMode = false;
             wakeButton.setText("WAKE WORD ON");
+            addMessage("FRIDAY",
+                    "Speech recognition is unavailable.");
             return;
         }
 
         try {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            SpeechRecognizer newRecognizer =
+                    SpeechRecognizer.createSpeechRecognizer(this);
 
-            recognizer.setRecognitionListener(new RecognitionListener() {
+            recognizer = newRecognizer;
+
+            newRecognizer.setRecognitionListener(
+                    new RecognitionListener() {
+
                 @Override
                 public void onReadyForSpeech(Bundle params) {}
 
@@ -259,13 +258,15 @@ public class MainActivity extends Activity {
                 public void onEndOfSpeech() {}
 
                 @Override
-                public void onPartialResults(Bundle partialResults) {}
+                public void onPartialResults(Bundle results) {}
 
                 @Override
                 public void onEvent(int eventType, Bundle params) {}
 
                 @Override
                 public void onResults(Bundle results) {
+                    if (session != recognitionGeneration) return;
+
                     ArrayList<String> matches =
                             results.getStringArrayList(
                                     SpeechRecognizer.RESULTS_RECOGNITION);
@@ -282,14 +283,17 @@ public class MainActivity extends Activity {
                     if (lookingForWakeWord) {
                         if (spoken.toLowerCase(Locale.ROOT)
                                 .contains("friday")) {
+
                             commandMode = true;
                             addMessage("YOU", spoken);
                             addMessage("FRIDAY",
                                     "I'm listening, Jack. Speak now.");
-                            startCommandListening();
+
+                            handler.postDelayed(
+                                    () -> startCommandListening(), 400);
                         } else {
                             handler.postDelayed(
-                                    () -> startWakeListening(), 400);
+                                    () -> startWakeListening(), 500);
                         }
                     } else {
                         handleVoiceCommand(spoken);
@@ -298,6 +302,8 @@ public class MainActivity extends Activity {
 
                 @Override
                 public void onError(int error) {
+                    if (session != recognitionGeneration) return;
+
                     stopRecognizer();
 
                     if (!wakeMode || !activityResumed) return;
@@ -319,8 +325,7 @@ public class MainActivity extends Activity {
                     RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
 
             intent.putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE,
-                    "en-IN");
+                    RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
 
             intent.putExtra(
                     RecognizerIntent.EXTRA_MAX_RESULTS, 1);
@@ -328,7 +333,7 @@ public class MainActivity extends Activity {
             intent.putExtra(
                     RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
 
-            recognizer.startListening(intent);
+            newRecognizer.startListening(intent);
 
         } catch (Exception e) {
             stopRecognizer();
@@ -369,12 +374,9 @@ public class MainActivity extends Activity {
 
     private void sendMessage(boolean fromVoice, String rawMessage) {
         String message = rawMessage.trim();
-
         if (message.isEmpty()) return;
 
-        if (!fromVoice) {
-            input.setText("");
-        }
+        if (!fromVoice) input.setText("");
 
         addMessage("YOU", message);
         status.setText("FRIDAY IS THINKING...");
@@ -397,8 +399,7 @@ public class MainActivity extends Activity {
                 if (fromVoice) {
                     speakReply(reply);
                 } else {
-                    status.setText(
-                            wakeMode
+                    status.setText(wakeMode
                             ? "STANDBY — SAY FRIDAY"
                             : "SYSTEM READY");
                 }
@@ -408,13 +409,11 @@ public class MainActivity extends Activity {
 
     private void speakReply(String reply) {
         if (ttsReady) {
-            String utteranceId = "FRIDAY_REPLY";
-
             int result = tts.speak(
                     reply,
                     TextToSpeech.QUEUE_FLUSH,
                     null,
-                    utteranceId);
+                    "FRIDAY_REPLY");
 
             if (result == TextToSpeech.ERROR) {
                 afterSpeech();
@@ -438,6 +437,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopRecognizer() {
+        recognitionGeneration++;
+
         if (recognizer != null) {
             try {
                 recognizer.cancel();
@@ -487,7 +488,6 @@ public class MainActivity extends Activity {
                              in, StandardCharsets.UTF_8))) {
 
             String line;
-
             while ((line = reader.readLine()) != null) {
                 contents.append(line).append('\n');
             }
