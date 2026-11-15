@@ -7,7 +7,10 @@ import android.graphics.Color;
 import android.view.Gravity;
 import android.widget.*;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.Manifest;
 import android.net.Uri;
+import android.speech.RecognizerIntent;
 import com.chaquo.python.Python;
 import com.chaquo.python.android.AndroidPlatform;
 import com.chaquo.python.PyObject;
@@ -19,11 +22,15 @@ import java.io.FileOutputStream;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import org.json.JSONObject;
 
 public class MainActivity extends Activity {
+
     private static final int PICK_ENV_FILE = 701;
     private static final int PICK_MEMORY_FILE = 702;
+    private static final int PICK_SPEECH = 703;
+    private static final int REQUEST_MICROPHONE = 704;
 
     LinearLayout messages;
     EditText input;
@@ -75,15 +82,21 @@ public class MainActivity extends Activity {
         input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
 
+        Button voice = new Button(this);
+        voice.setText("VOICE");
+        voice.setOnClickListener(v -> startVoiceInput());
+
         Button send = new Button(this);
         send.setText("SEND");
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.addView(input, new LinearLayout.LayoutParams(0, -2, 1));
+        bottom.addView(voice);
         bottom.addView(send);
         root.addView(bottom);
 
         send.setOnClickListener(v -> sendMessage());
+
         input.setOnEditorActionListener((v, actionId, event) -> {
             sendMessage();
             return true;
@@ -93,6 +106,65 @@ public class MainActivity extends Activity {
 
         addMessage("FRIDAY", "Welcome back, Jack. Systems online.");
         addMessage("FRIDAY", "Import your API config and existing FRIDAY memory using the buttons above.");
+        addMessage("FRIDAY", "Tap VOICE to speak to me.");
+    }
+
+    private void startVoiceInput() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            requestPermissions(
+                new String[]{Manifest.permission.RECORD_AUDIO},
+                REQUEST_MICROPHONE
+            );
+            return;
+        }
+
+        launchSpeechRecognition();
+    }
+
+    private void launchSpeechRecognition() {
+        try {
+            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+
+            intent.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            );
+
+            intent.putExtra(
+                RecognizerIntent.EXTRA_PROMPT,
+                "Speak to FRIDAY"
+            );
+
+            intent.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                "en-IN"
+            );
+
+            startActivityForResult(intent, PICK_SPEECH);
+
+        } catch (Exception e) {
+            addMessage("FRIDAY", "Voice recognition is unavailable on this device.");
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults) {
+
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == REQUEST_MICROPHONE) {
+            if (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                launchSpeechRecognition();
+            } else {
+                addMessage("FRIDAY", "Microphone permission was denied.");
+            }
+        }
     }
 
     private void openPicker(int requestCode) {
@@ -136,6 +208,20 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == PICK_SPEECH) {
+            if (resultCode == RESULT_OK && data != null) {
+                ArrayList<String> results = data.getStringArrayListExtra(
+                    RecognizerIntent.EXTRA_RESULTS
+                );
+
+                if (results != null && !results.isEmpty()) {
+                    input.setText(results.get(0));
+                    sendMessage();
+                }
+            }
+            return;
+        }
 
         if ((requestCode != PICK_ENV_FILE && requestCode != PICK_MEMORY_FILE)
                 || resultCode != RESULT_OK || data == null) {
